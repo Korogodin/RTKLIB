@@ -71,7 +71,8 @@ static int decode_xf5raw(raw_t *raw)
     int i,j,prn,sat,n=0,nsat,week;
     unsigned char *p=raw->buff+2;
     char *q,tstr[32],flag;
-    int bandnum = 0;
+	int bandnum = 0;
+	int initnum = 0;
     
     trace(4,"decode_xf5raw: len=%d\n",raw->len);
     
@@ -118,23 +119,29 @@ static int decode_xf5raw(raw_t *raw)
         time2str(time,tstr,3);
         trace(2,"nvs xf5raw time tag jump error: time=%s\n",tstr);
         return 0;
-    }
+	}
     if (fabs(timediff(time,raw->time))<=1e-3) {
-        time2str(time,tstr,3);
-        trace(2,"nvs xf5raw time tag duplicated: time=%s\n",tstr);
+		time2str(time,tstr,3);
+		trace(2,"nvs xf5raw time tag duplicated: time=%s\n",tstr);
         return 0;
     }
-    for (i=0,p+=27;(i<nsat) && (n<MAXOBS); i++,p+=30) {
+	for (i=0,p+=27;(i<nsat) && (n<MAXOBS); i++,p+=30) {
         raw->obs.data[n].time  = time;
-        sys = (U1(p)==1 || U1(p)==33)?SYS_GLO:((U1(p)==2)?SYS_GPS:((U1(p)==4)?SYS_SBS:SYS_NONE));
-        if (U1(p)==33) {
+		sys = (U1(p)==1 || U1(p)==33)?SYS_GLO:((U1(p)==2 || U1(p)==34 ||U1(p)==66)?SYS_GPS:((U1(p)==4)?SYS_SBS:SYS_NONE));
+		if (U1(p)==66) {
+			initnum = 2; /* L5 */
+		}
+		else {
+			initnum = 0;
+		}
+		if (U1(p)==33 || U1(p)==34) {
             bandnum = 1; /* L2 */
         } else
-            bandnum = 0;
+			bandnum = 0;
 
-        prn = U1(p+1);
+		prn = U1(p+1);
         if (sys == SYS_SBS) prn += 120; /* Correct this */
-        if (!(sat=satno(sys,prn))) {
+		if (!(sat=satno(sys,prn))) {
             trace(2,"nvs xf5raw satellite number error: sys=%d prn=%d\n",sys,prn);
             continue;
         }
@@ -143,7 +150,7 @@ static int decode_xf5raw(raw_t *raw)
         Pb = R8(p+12);
         Db = R8(p+20);
 
-        if (bandnum == 1){
+		if (bandnum == 1 || initnum == 2){
             if (n > 0) {
                 if (raw->obs.data[n-1].sat != sat || raw->obs.data[n-1].time.time != time.time || raw->obs.data[n-1].time.sec != time.sec)
                     continue;
@@ -159,16 +166,29 @@ static int decode_xf5raw(raw_t *raw)
             continue;
         }
         raw->obs.data[n].SNR[bandnum]=(unsigned char)(I1(p+3)*4.0+0.5);
-        if (sys==SYS_GLO) {
-            if (bandnum == 0)
-                raw->obs.data[n].L[0]  =  Lb - toff*(FREQ1_GLO+DFRQ1_GLO*carrNo);
-            else
-                raw->obs.data[n].L[1]  =  Lb - toff*(FREQ2_GLO+DFRQ2_GLO*carrNo);
-        } else {
-            raw->obs.data[n].L[0]  =  Lb - toff*FREQ1;
-        }
-        raw->obs.data[n].P[bandnum]    = (Pb-dTowFrac)*CLIGHT*0.001 - toff*CLIGHT; /* in ms, needs to be converted */
-        raw->obs.data[n].D[bandnum]    =  (float)Db;
+		if (sys==SYS_GPS) {
+			if (bandnum+initnum == 0) {
+				raw->obs.data[n].L[0]  =  Lb - toff*(FREQ1); }
+				else {
+				if (initnum == 2) {
+				raw->obs.data[n].L[2]  =  Lb - toff*(FREQ5); }
+				else {
+				raw->obs.data[n].L[1]  =  Lb - toff*(FREQ2); }
+				}
+
+		} else {
+		  if (bandnum == 0) {
+		  raw->obs.data[n].L[0]  =  Lb - toff*(FREQ1_GLO+DFRQ1_GLO*carrNo);
+		  }
+		  else {
+		  raw->obs.data[n].L[1]  = Lb - toff*(FREQ2_GLO+DFRQ2_GLO*carrNo);
+		} }
+		if (initnum == 0) {
+		raw->obs.data[n].P[bandnum]    = (Pb-dTowFrac)*CLIGHT*0.001 - toff*CLIGHT; /* in ms, needs to be converted */
+		raw->obs.data[n].D[bandnum]    =  (float)Db; }
+		else {
+		raw->obs.data[n].P[initnum]    = (Pb-dTowFrac)*CLIGHT*0.001 - toff*CLIGHT; /* in ms, needs to be converted */
+		raw->obs.data[n].D[initnum]    =  (float)Db; }
         
         /* set LLI if meas flag 4 (carrier phase present) off -> on */
         flag=U1(p+28);
@@ -182,13 +202,35 @@ static int decode_xf5raw(raw_t *raw)
                 n, (raw->obs.data[n].SNR[0])/4.0, U1(p+28) );
         }
 #endif
-        if (bandnum == 0) {
-            raw->obs.data[n].code[bandnum] = CODE_L1C;
-            raw->obs.data[n].sat = sat;
-        } else
-            raw->obs.data[n].code[bandnum] = CODE_L2C;
+		if (bandnum+initnum == 0) {
+			raw->obs.data[n].code[0] = CODE_L1C;
+			raw->obs.data[n].sat = sat;
+		} else {
+			if(sys==SYS_GPS) {
+			if(initnum == 2) {
+			raw->obs.data[n].code[initnum] = CODE_L5I;
+			}
+			else {
+			if(bandnum == 1) {
+			raw->obs.data[n].code[initnum] = CODE_L2C;
+		  }
+			else {
+			raw->obs.data[n].code[initnum] = CODE_L1C;
+			}
+		 }
+		}
+			else{
+			 if(bandnum == 1) {
+			 raw->obs.data[n].code[bandnum] = CODE_L2C; }
+			 else {
+			 raw->obs.data[n].code[bandnum] = CODE_L1C;
+			}
+			 }
+			  }
 
-        if (bandnum == 0)
+
+
+        if (bandnum == 0 && initnum == 0)
             for (j=1;j<NFREQ+NEXOBS;j++) {
                 raw->obs.data[n].L[j]=raw->obs.data[n].P[j]=0.0;
                 raw->obs.data[n].D[j]=0.0;
@@ -196,7 +238,7 @@ static int decode_xf5raw(raw_t *raw)
                 raw->obs.data[n].code[j]=CODE_NONE;
             }
         n++;
-    }
+	}
     raw->time=time;
     raw->obs.n=n;
     return 1;
